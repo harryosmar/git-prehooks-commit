@@ -1,0 +1,369 @@
+#!/bin/bash
+
+# pre-commit hook - Runs code quality checks before commit
+# This hook is called with no arguments before a commit is made
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}🚀 Running pre-commit checks...${NC}"
+echo ""
+
+ERRORS=0
+
+# Load configuration from .githooks-config.json
+CONFIG_FILE=".githooks-config.json"
+
+# Helper function to read config values
+get_config() {
+    local check_name=$1
+    local field=$2
+    local default=$3
+    if [ -f "$CONFIG_FILE" ]; then
+        # Extract the specific check's field value
+        value=$(grep -A 10 "\"$check_name\"" "$CONFIG_FILE" | grep "\"$field\"" | head -1 | sed 's/.*: *//;s/[,"]//g;s/ //g')
+        if [ -n "$value" ]; then
+            echo "$value"
+        else
+            echo "$default"
+        fi
+    else
+        echo "$default"
+    fi
+}
+
+# Read protected branches from config
+if [ -f "$CONFIG_FILE" ]; then
+    PROTECTED_BRANCHES=$(grep -A 1 '"protected_branches"' "$CONFIG_FILE" | grep -o '"[^"]*"' | grep -v 'protected_branches' | tr -d '"' | paste -sd '|' -)
+    if [ -z "$PROTECTED_BRANCHES" ]; then
+        PROTECTED_BRANCHES="main|master|production|release"
+    fi
+else
+    PROTECTED_BRANCHES="main|master|production|release"
+fi
+
+# Check 1: Prevent commits to protected branches
+BRANCH=$(git symbolic-ref HEAD 2>/dev/null | sed 's/refs\/heads\///')
+
+if echo "$BRANCH" | grep -qE "^($PROTECTED_BRANCHES)$"; then
+    echo -e "${RED}✗ Direct commits to '$BRANCH' are not allowed!${NC}"
+    echo "Please create a feature branch and submit a pull request."
+    exit 1
+fi
+
+# Check 2: Prevent committing to detached HEAD
+if [ -z "$BRANCH" ]; then
+    echo -e "${YELLOW}⚠ Warning: You are in detached HEAD state${NC}"
+    echo ""
+fi
+
+# Check 3: Check for merge conflict markers
+CONFLICT_MARKERS_ENABLED=$(get_config 'conflict_markers' 'enabled' 'true')
+CONFLICT_MARKERS_BLOCKING=$(get_config 'conflict_markers' 'blocking' 'true')
+
+if [ "$CONFLICT_MARKERS_ENABLED" = "true" ]; then
+    echo -e "${YELLOW}Checking for merge conflict markers...${NC}"
+    CONFLICT_MARKERS=$(git diff --cached --name-only | xargs grep -l -E '^(<<<<<<<|=======|>>>>>>>)' 2>/dev/null)
+    
+    if [ -n "$CONFLICT_MARKERS" ]; then
+        CONFLICT_COUNT=$(echo "$CONFLICT_MARKERS" | wc -l | tr -d ' ')
+        if [ "$CONFLICT_MARKERS_BLOCKING" = "true" ]; then
+            echo -e "${RED}✗ Merge conflict markers found in $CONFLICT_COUNT file(s):${NC}"
+            echo ""
+            echo "$CONFLICT_MARKERS" | while IFS= read -r file; do
+                echo "  • $file"
+            done
+            echo ""
+            ERRORS=$((ERRORS + 1))
+        else
+            echo -e "${YELLOW}⚠ Warning: Merge conflict markers found in $CONFLICT_COUNT file(s):${NC}"
+            echo ""
+            echo "$CONFLICT_MARKERS" | while IFS= read -r file; do
+                echo "  • $file"
+            done
+            echo ""
+        fi
+    else
+        echo -e "${GREEN}✓ No conflict markers found${NC}"
+    fi
+    echo ""
+fi
+
+# Check 4: Check for debug statements
+DEBUG_ENABLED=$(get_config 'debug_statements' 'enabled' 'true')
+DEBUG_BLOCKING=$(get_config 'debug_statements' 'blocking' 'false')
+
+if [ "$DEBUG_ENABLED" = "true" ]; then
+    echo -e "${YELLOW}Checking for debug statements...${NC}"
+    
+    # Read patterns from config or use defaults
+    if [ -f "$CONFIG_FILE" ]; then
+        DEBUG_PATTERNS=$(grep -A 5 '"debug_statements"' "$CONFIG_FILE" | grep '"patterns"' | sed 's/.*\[//;s/\].*//' | tr -d '"' | tr ',' '|' | sed 's/ //g')
+    fi
+    [ -z "$DEBUG_PATTERNS" ] && DEBUG_PATTERNS="console\.log|debugger|print\(|var_dump|dd\(|dump\("
+    
+    DEBUG_FILES=$(git diff --cached --name-only | grep -E '\.(js|ts|jsx|tsx|py|php|go)$' | xargs grep -l -E "$DEBUG_PATTERNS" 2>/dev/null)
+    
+    if [ -n "$DEBUG_FILES" ]; then
+        DEBUG_COUNT=$(echo "$DEBUG_FILES" | wc -l | tr -d ' ')
+        if [ "$DEBUG_BLOCKING" = "true" ]; then
+            echo -e "${RED}✗ Debug statements found in $DEBUG_COUNT file(s):${NC}"
+            echo ""
+            echo "$DEBUG_FILES" | while IFS= read -r file; do
+                echo "  • $file"
+            done
+            echo ""
+            echo "Consider removing them before committing"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo -e "${YELLOW}⚠ Warning: Debug statements found in $DEBUG_COUNT file(s):${NC}"
+            echo ""
+            echo "$DEBUG_FILES" | while IFS= read -r file; do
+                echo "  • $file"
+            done
+            echo ""
+            echo -e "${YELLOW}Consider removing them before committing${NC}"
+        fi
+    else
+        echo -e "${GREEN}✓ No debug statements found${NC}"
+    fi
+    echo ""
+fi
+
+# Check 5: Check for TODO/FIXME comments in staged files
+TODO_ENABLED=$(get_config 'todo_comments' 'enabled' 'true')
+TODO_BLOCKING=$(get_config 'todo_comments' 'blocking' 'false')
+
+if [ "$TODO_ENABLED" = "true" ]; then
+    echo -e "${YELLOW}Checking for TODO/FIXME comments...${NC}"
+    
+    # Read patterns from config or use defaults
+    if [ -f "$CONFIG_FILE" ]; then
+        TODO_PATTERNS=$(grep -A 5 '"todo_comments"' "$CONFIG_FILE" | grep '"patterns"' | sed 's/.*\[//;s/\].*//' | tr -d '"' | tr ',' '|' | sed 's/ //g')
+    fi
+    [ -z "$TODO_PATTERNS" ] && TODO_PATTERNS="TODO|FIXME|XXX|HACK"
+    
+    # Get files with TODO/FIXME and format with filename
+    TODO_RESULTS=""
+    TODO_FILE_COUNT=0
+    TODO_TOTAL_COUNT=0
+    
+    while IFS= read -r file; do
+        if [ -n "$file" ]; then
+            COUNT=$(git diff --cached "$file" 2>/dev/null | grep -E "^\+.*\b($TODO_PATTERNS)\b" | wc -l | tr -d ' ')
+            if [ "$COUNT" -gt 0 ]; then
+                TODO_RESULTS="${TODO_RESULTS}  • $file ($COUNT comment(s))\n"
+                TODO_FILE_COUNT=$((TODO_FILE_COUNT + 1))
+                TODO_TOTAL_COUNT=$((TODO_TOTAL_COUNT + COUNT))
+            fi
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM)
+    
+    if [ $TODO_TOTAL_COUNT -gt 0 ]; then
+        if [ "$TODO_BLOCKING" = "true" ]; then
+            echo -e "${RED}✗ Found $TODO_TOTAL_COUNT new TODO/FIXME comment(s) in $TODO_FILE_COUNT file(s):${NC}"
+            echo ""
+            echo -e "$TODO_RESULTS"
+            echo "Make sure they are tracked in your issue tracker"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo -e "${YELLOW}⚠ Warning: Found $TODO_TOTAL_COUNT new TODO/FIXME comment(s) in $TODO_FILE_COUNT file(s):${NC}"
+            echo ""
+            echo -e "$TODO_RESULTS"
+            echo "Make sure they are tracked in your issue tracker"
+        fi
+    else
+        echo -e "${GREEN}✓ No new TODO/FIXME comments${NC}"
+    fi
+    echo ""
+fi
+
+# Check 6: Check file sizes
+LARGE_FILES_ENABLED=$(get_config 'large_files' 'enabled' 'true')
+LARGE_FILES_BLOCKING=$(get_config 'large_files' 'blocking' 'false')
+
+if [ "$LARGE_FILES_ENABLED" = "true" ]; then
+    echo -e "${YELLOW}Checking for large files...${NC}"
+    # Read max size from config or use default
+    if [ -f "$CONFIG_FILE" ]; then
+        MAX_FILE_SIZE=$(grep -A 3 '"large_files"' "$CONFIG_FILE" | grep 'max_size_bytes' | grep -o '[0-9]*')
+        [ -z "$MAX_FILE_SIZE" ] && MAX_FILE_SIZE=5242880
+    else
+        MAX_FILE_SIZE=5242880 # 5MB in bytes
+    fi
+    
+    LARGE_FILES=$(git diff --cached --name-only | while read file; do
+        if [ -f "$file" ]; then
+            SIZE=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+            if [ "$SIZE" -gt "$MAX_FILE_SIZE" ]; then
+                echo "$file ($(numfmt --to=iec-i --suffix=B $SIZE 2>/dev/null || echo "${SIZE} bytes"))"
+            fi
+        fi
+    done)
+    
+    if [ -n "$LARGE_FILES" ]; then
+        LARGE_FILE_COUNT=$(echo "$LARGE_FILES" | wc -l | tr -d ' ')
+        if [ "$LARGE_FILES_BLOCKING" = "true" ]; then
+            echo -e "${RED}✗ Large files detected ($LARGE_FILE_COUNT file(s)):${NC}"
+            echo ""
+            echo "$LARGE_FILES" | while IFS= read -r line; do
+                echo "  • $line"
+            done
+            echo ""
+            echo "Consider using Git LFS for large files"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo -e "${YELLOW}⚠ Warning: Large files detected ($LARGE_FILE_COUNT file(s)):${NC}"
+            echo ""
+            echo "$LARGE_FILES" | while IFS= read -r line; do
+                echo "  • $line"
+            done
+            echo ""
+            echo "Consider using Git LFS for large files"
+        fi
+    else
+        echo -e "${GREEN}✓ No large files detected${NC}"
+    fi
+    echo ""
+fi
+
+# Check 7: Check for sensitive data patterns
+SENSITIVE_ENABLED=$(get_config 'sensitive_data' 'enabled' 'true')
+SENSITIVE_BLOCKING=$(get_config 'sensitive_data' 'blocking' 'true')
+
+if [ "$SENSITIVE_ENABLED" = "true" ]; then
+    echo -e "${YELLOW}Checking for sensitive data...${NC}"
+    
+    # Read patterns from config or use defaults
+    if [ -f "$CONFIG_FILE" ]; then
+        SENSITIVE_WORDS=$(grep -A 10 '"sensitive_data"' "$CONFIG_FILE" | grep '"patterns"' | sed 's/.*\[//;s/\].*//' | tr -d '"' | tr ',' '|' | sed 's/ //g')
+    fi
+    [ -z "$SENSITIVE_WORDS" ] && SENSITIVE_WORDS="password|api_key|secret|token|private_key|aws_access_key_id|aws_secret_access_key"
+    
+    SENSITIVE_PATTERNS="($SENSITIVE_WORDS).*=.*['\"][^'\"]{8,}"
+    
+    # Get files with sensitive data and format with filename first
+    SENSITIVE_RESULTS=""
+    SENSITIVE_COUNT=0
+    
+    while IFS= read -r file; do
+        if [ -n "$file" ]; then
+            MATCHES=$(git diff --cached "$file" 2>/dev/null | grep -iE "^\+.*$SENSITIVE_PATTERNS" | head -3)
+            if [ -n "$MATCHES" ]; then
+                SENSITIVE_RESULTS="${SENSITIVE_RESULTS}\nFile: $file\n$MATCHES\n"
+                SENSITIVE_COUNT=$((SENSITIVE_COUNT + 1))
+            fi
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM)
+    
+    if [ $SENSITIVE_COUNT -gt 0 ]; then
+        if [ "$SENSITIVE_BLOCKING" = "true" ]; then
+            echo -e "${RED}✗ Potential sensitive data found in $SENSITIVE_COUNT file(s):${NC}"
+            echo -e "$SENSITIVE_RESULTS"
+            echo -e "${RED}Please review and remove any hardcoded credentials!${NC}"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo -e "${YELLOW}⚠ Warning: Potential sensitive data found in $SENSITIVE_COUNT file(s):${NC}"
+            echo -e "$SENSITIVE_RESULTS"
+            echo -e "${YELLOW}Please review and remove any hardcoded credentials!${NC}"
+        fi
+    else
+        echo -e "${GREEN}✓ No sensitive data patterns detected${NC}"
+    fi
+    echo ""
+fi
+
+# Check 8: Ensure no empty files are being committed
+echo -e "${YELLOW}Checking for empty files...${NC}"
+EMPTY_FILES=$(git diff --cached --name-only | while read file; do
+    if [ -f "$file" ] && [ ! -s "$file" ]; then
+        echo "$file"
+    fi
+done)
+
+if [ -n "$EMPTY_FILES" ]; then
+    EMPTY_COUNT=$(echo "$EMPTY_FILES" | wc -l | tr -d ' ')
+    echo -e "${YELLOW}⚠ Warning: Empty files detected ($EMPTY_COUNT file(s)):${NC}"
+    echo ""
+    echo "$EMPTY_FILES" | while IFS= read -r file; do
+        echo "  • $file"
+    done
+    echo ""
+else
+    echo -e "${GREEN}✓ No empty files${NC}"
+fi
+echo ""
+
+# Check 9: Check for trailing whitespace
+WHITESPACE_ENABLED=$(get_config 'trailing_whitespace' 'enabled' 'true')
+WHITESPACE_BLOCKING=$(get_config 'trailing_whitespace' 'blocking' 'false')
+
+if [ "$WHITESPACE_ENABLED" = "true" ]; then
+    echo -e "${YELLOW}Checking for trailing whitespace...${NC}"
+    
+    # Get files with trailing whitespace
+    WHITESPACE_FILES=$(git diff --cached --check 2>&1 | grep "trailing whitespace" | cut -d: -f1 | sort -u)
+    
+    if [ -n "$WHITESPACE_FILES" ]; then
+        WHITESPACE_FILE_COUNT=$(echo "$WHITESPACE_FILES" | wc -l | tr -d ' ')
+        WHITESPACE_LINE_COUNT=$(git diff --cached --check 2>&1 | grep "trailing whitespace" | wc -l | tr -d ' ')
+        
+        if [ "$WHITESPACE_BLOCKING" = "true" ]; then
+            echo -e "${RED}✗ Found trailing whitespace in $WHITESPACE_FILE_COUNT file(s) ($WHITESPACE_LINE_COUNT line(s)):${NC}"
+            echo ""
+            echo "$WHITESPACE_FILES" | while IFS= read -r file; do
+                echo "  • $file"
+            done
+            echo ""
+            echo "Run: git diff --cached --check"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo -e "${YELLOW}⚠ Warning: Found trailing whitespace in $WHITESPACE_FILE_COUNT file(s) ($WHITESPACE_LINE_COUNT line(s)):${NC}"
+            echo ""
+            echo "$WHITESPACE_FILES" | while IFS= read -r file; do
+                echo "  • $file"
+            done
+            echo ""
+            echo "Run: git diff --cached --check"
+        fi
+    else
+        echo -e "${GREEN}✓ No trailing whitespace${NC}"
+    fi
+    echo ""
+fi
+
+# Check 10: Verify staged files exist
+echo -e "${YELLOW}Verifying staged files...${NC}"
+MISSING_FILES=$(git diff --cached --name-only --diff-filter=A | while read file; do
+    if [ ! -f "$file" ]; then
+        echo "$file"
+    fi
+done)
+
+if [ -n "$MISSING_FILES" ]; then
+    MISSING_COUNT=$(echo "$MISSING_FILES" | wc -l | tr -d ' ')
+    echo -e "${RED}✗ Staged files not found ($MISSING_COUNT file(s)):${NC}"
+    echo ""
+    echo "$MISSING_FILES" | while IFS= read -r file; do
+        echo "  • $file"
+    done
+    echo ""
+    ERRORS=$((ERRORS + 1))
+else
+    echo -e "${GREEN}✓ All staged files exist${NC}"
+fi
+echo ""
+
+# Summary
+if [ $ERRORS -gt 0 ]; then
+    echo -e "${RED}❌ Pre-commit checks failed with $ERRORS error(s)${NC}"
+    echo "Please fix the errors above before committing."
+    exit 1
+else
+    echo -e "${GREEN}✅ All pre-commit checks passed!${NC}"
+    exit 0
+fi

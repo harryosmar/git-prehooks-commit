@@ -1,0 +1,50 @@
+{
+  "commit-msg": {
+    "jira_project": "CDE",
+    "min_message_length": 10,
+    "max_subject_length": 72,
+    "require_type": true,
+    "allowed_types": ["feat", "fix", "hotfix", "docs", "style", "refactor", "perf", "test", "chore", "build", "ci", "revert", "security"]
+  },
+  "pre-commit": {
+    "protected_branches": ["develop", "master", "micro-qa", "micro-qa-adhoc"],
+    "checks": {
+      "conflict_markers": {
+        "enabled": true,
+        "blocking": true
+      },
+      "debug_statements": {
+        "enabled": true,
+        "blocking": false,
+        "patterns": ["console\\.log", "debugger", "print\\(", "var_dump", "dd\\(", "dump\\("]
+      },
+      "todo_comments": {
+        "enabled": true,
+        "blocking": false,
+        "patterns": ["TODO", "FIXME", "XXX", "HACK"]
+      },
+      "large_files": {
+        "enabled": true,
+        "blocking": false,
+        "max_size_bytes": 5242880
+      },
+      "sensitive_data": {
+        "enabled": true,
+        "blocking": false,
+        "patterns": [
+          "password",
+          "api_key",
+          "secret",
+          "token",
+          "private_key",
+          "aws_access_key_id",
+          "aws_secret_access_key"
+        ]
+      },
+      "trailing_whitespace": {
+        "enabled": true,
+        "blocking": false
+      }
+    }
+  }
+}
