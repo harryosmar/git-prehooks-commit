@@ -353,15 +353,6 @@ git commit -m "CDE-123: feat: Add user authentication"
 # Output: ✅ Commit message validated successfully!
 ```
 
-### Bypassing Hooks (Emergency Only)
-
-```bash
-# Skip all hooks (NOT RECOMMENDED)
-git commit --no-verify -m "Emergency hotfix"
-```
-
-⚠️ **Warning:** Only bypass hooks in genuine emergencies!
-
 ---
 
 ## Testing
@@ -593,7 +584,6 @@ If a check incorrectly flags your code:
 
 1. Review the pattern in `.githooks-config.json`
 2. Adjust or remove the pattern
-3. Or temporarily bypass with `--no-verify` (document why)
 
 ---
 
@@ -604,7 +594,6 @@ Since Git hooks are local and not tracked by Git:
 1. **Add to onboarding docs**: Include hook setup in new developer onboarding
 2. **Run setup script**: Each team member must run `./setup-hooks.sh`
 3. **Keep templates updated**: Commit changes to `hooks-templates/` directory
-4. **Document exceptions**: If someone bypasses hooks, document the reason
 
 ---
 
@@ -624,9 +613,6 @@ Since Git hooks are local and not tracked by Git:
 ---
 
 ## FAQ
-
-**Q: Can I bypass the hooks?**  
-A: Yes, use `git commit --no-verify`, but only in emergencies.
 
 **Q: Do hooks run on `git merge`?**  
 A: The commit-msg hook skips merge commits automatically.
